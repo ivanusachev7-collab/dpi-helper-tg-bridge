@@ -88,8 +88,11 @@ Deno.serve(async (req: Request) => {
     }
   };
   upstream.onmessage = (ev) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(ev.data);
+    if (client.readyState !== WebSocket.OPEN) return;
+    try {
+      client.send(toBinary(ev.data));
+    } catch (_) {
+      /* ignore */
     }
   };
   upstream.onclose = () => {
@@ -103,12 +106,24 @@ Deno.serve(async (req: Request) => {
     }
   };
 
+  function toBinary(d: unknown): ArrayBuffer | Uint8Array {
+    if (d instanceof ArrayBuffer) return d;
+    if (d instanceof Uint8Array) {
+      // Slice to a fresh buffer in case it's a view over a larger buffer.
+      return d.slice().buffer;
+    }
+    if (typeof d === "string") {
+      // Telegram never sends text frames, but if some intermediate proxy
+      // wraps binary as base64 text we don't want to accidentally pass it.
+      return new TextEncoder().encode(d).buffer;
+    }
+    return new ArrayBuffer(0);
+  }
+
   client.onmessage = (ev) => {
-    const data = ev.data instanceof ArrayBuffer
-      ? ev.data
-      : (ev.data as Uint8Array).buffer;
+    const data = toBinary(ev.data);
     if (!upstreamReady) {
-      clientPending.push(data);
+      clientPending.push(data as ArrayBuffer);
       return;
     }
     try {
