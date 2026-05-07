@@ -94,15 +94,19 @@ Deno.serve(async (req: Request) => {
       }
     }
   };
-  upstream.onmessage = (ev) => {
+  upstream.onmessage = async (ev) => {
     framesDown++;
-    const bin = toBinary(ev.data);
+    const dataType = ev.data?.constructor?.name ?? typeof ev.data;
+    const bin = await toBinary(ev.data);
     const size = (bin as ArrayBuffer).byteLength;
     bytesDown += size;
-    if (framesDown <= 3) {
-      console.log(`[${id}] DOWN frame #${framesDown}: ${size} bytes`);
+    if (framesDown <= 5) {
+      console.log(`[${id}] DOWN frame #${framesDown}: ${size} bytes (incoming type=${dataType})`);
     }
-    if (client.readyState !== WebSocket.OPEN) return;
+    if (client.readyState !== WebSocket.OPEN) {
+      console.log(`[${id}] client not OPEN (state=${client.readyState}), dropping DOWN frame`);
+      return;
+    }
     try {
       client.send(bin);
     } catch (e) {
@@ -122,22 +126,32 @@ Deno.serve(async (req: Request) => {
     }
   };
 
-  function toBinary(d: unknown): ArrayBuffer | Uint8Array {
+  async function toBinary(d: unknown): Promise<ArrayBuffer | Uint8Array> {
     if (d instanceof ArrayBuffer) return d;
     if (d instanceof Uint8Array) {
-      // Slice to a fresh buffer in case it's a view over a larger buffer.
       return d.slice().buffer;
     }
+    // deno-lint-ignore no-explicit-any
+    const anyD = d as any;
+    if (anyD && typeof anyD.arrayBuffer === "function") {
+      // Blob — Deno's outbound WebSocket may deliver binary as Blob even when
+      // we set binaryType = "arraybuffer". Convert it.
+      try {
+        const ab = await anyD.arrayBuffer();
+        return ab as ArrayBuffer;
+      } catch (e) {
+        console.log(`[${id}] Blob.arrayBuffer() failed: ${e}`);
+      }
+    }
     if (typeof d === "string") {
-      // Telegram never sends text frames, but if some intermediate proxy
-      // wraps binary as base64 text we don't want to accidentally pass it.
       return new TextEncoder().encode(d).buffer;
     }
+    console.log(`[${id}] toBinary: UNKNOWN type, ctor=${(d as { constructor?: { name?: string } } | null)?.constructor?.name}`);
     return new ArrayBuffer(0);
   }
 
-  client.onmessage = (ev) => {
-    const data = toBinary(ev.data);
+  client.onmessage = async (ev) => {
+    const data = await toBinary(ev.data);
     const size = (data as ArrayBuffer).byteLength;
     if (!upstreamReady) {
       clientPending.push(data as ArrayBuffer);
@@ -146,7 +160,7 @@ Deno.serve(async (req: Request) => {
     }
     framesUp++;
     bytesUp += size;
-    if (framesUp <= 3) {
+    if (framesUp <= 5) {
       console.log(`[${id}] UP frame #${framesUp}: ${size} bytes`);
     }
     try {
