@@ -76,31 +76,47 @@ Deno.serve(async (req: Request) => {
   let upstreamReady = false;
   const clientPending: ArrayBuffer[] = [];
 
+  const id = Math.random().toString(36).slice(2, 8);
+  let bytesUp = 0, bytesDown = 0, framesUp = 0, framesDown = 0;
+  console.log(`[${id}] new client → dc${dc} → ${upstreamUrl}`);
+
   upstream.onopen = () => {
     upstreamReady = true;
+    console.log(`[${id}] upstream OPEN, flushing ${clientPending.length} pending`);
     while (clientPending.length > 0) {
       const buf = clientPending.shift()!;
       try {
         upstream.send(buf);
-      } catch (_) {
-        /* ignore */
+        bytesUp += (buf as ArrayBuffer).byteLength;
+        framesUp++;
+      } catch (e) {
+        console.log(`[${id}] upstream send error on flush: ${e}`);
       }
     }
   };
   upstream.onmessage = (ev) => {
+    framesDown++;
+    const bin = toBinary(ev.data);
+    const size = (bin as ArrayBuffer).byteLength;
+    bytesDown += size;
+    if (framesDown <= 3) {
+      console.log(`[${id}] DOWN frame #${framesDown}: ${size} bytes`);
+    }
     if (client.readyState !== WebSocket.OPEN) return;
     try {
-      client.send(toBinary(ev.data));
-    } catch (_) {
-      /* ignore */
+      client.send(bin);
+    } catch (e) {
+      console.log(`[${id}] client send error: ${e}`);
     }
   };
-  upstream.onclose = () => {
+  upstream.onclose = (ev) => {
+    console.log(`[${id}] upstream CLOSE code=${ev.code} reason=${ev.reason} | up=${bytesUp}b/${framesUp}f down=${bytesDown}b/${framesDown}f`);
     if (client.readyState === WebSocket.OPEN) {
       client.close();
     }
   };
-  upstream.onerror = () => {
+  upstream.onerror = (e) => {
+    console.log(`[${id}] upstream ERROR: ${e}`);
     if (client.readyState === WebSocket.OPEN) {
       client.close(1011, "upstream error");
     }
@@ -122,14 +138,21 @@ Deno.serve(async (req: Request) => {
 
   client.onmessage = (ev) => {
     const data = toBinary(ev.data);
+    const size = (data as ArrayBuffer).byteLength;
     if (!upstreamReady) {
       clientPending.push(data as ArrayBuffer);
+      console.log(`[${id}] UP frame buffered (upstream not ready): ${size} bytes`);
       return;
+    }
+    framesUp++;
+    bytesUp += size;
+    if (framesUp <= 3) {
+      console.log(`[${id}] UP frame #${framesUp}: ${size} bytes`);
     }
     try {
       upstream.send(data);
-    } catch (_) {
-      /* ignore */
+    } catch (e) {
+      console.log(`[${id}] upstream send error: ${e}`);
     }
   };
   client.onclose = () => {
